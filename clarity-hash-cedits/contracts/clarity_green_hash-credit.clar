@@ -18,6 +18,8 @@
 (define-constant ERR_MINER_NOT_VERIFIED (err u103))
 (define-constant ERR_ALREADY_VERIFIED (err u104))
 (define-constant ERR_INVALID_HASH_POWER (err u105))
+(define-constant ERR_CREDIT_NOT_FOUND (err u106))
+(define-constant ERR_ALREADY_REDEEMED (err u107))
 (define-constant TOKEN_NAME "Green Hash Credits")
 (define-constant TOKEN_SYMBOL "GHC")
 (define-constant TOKEN_DECIMALS u6)
@@ -42,6 +44,21 @@
     principal
     bool
 )
+
+(define-map mining-credits
+    uint
+    {
+        miner: principal,
+        hash-power: uint,
+        energy-source: (string-ascii 100),
+        issued-date: uint,
+        redeemed: bool,
+        redeemed-by: (optional principal),
+        redemption-date: (optional uint),
+    }
+)
+
+(define-data-var next-credit-id uint u1)
 
 ;; SIP-010 Standard Functions
 (define-public (transfer
@@ -181,6 +198,87 @@
     )
 )
 
+;; Credit Issuance Functions
+(define-public (issue-credits
+        (miner principal)
+        (credit-amount uint)
+    )
+    (let (
+            (miner-data (unwrap! (map-get? verified-miners miner) ERR_MINER_NOT_VERIFIED))
+            (credit-id (var-get next-credit-id))
+            (new-total-supply (+ (var-get total-supply) credit-amount))
+        )
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (default-to false (map-get? verifiers tx-sender))
+            ERR_UNAUTHORIZED
+        )
+        (asserts! (> credit-amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (<= new-total-supply MAX_SUPPLY) ERR_INVALID_AMOUNT)
+
+        (try! (ft-mint? green-hash-credits credit-amount miner))
+        (var-set total-supply new-total-supply)
+
+        (map-set mining-credits credit-id {
+            miner: miner,
+            hash-power: (get hash-power miner-data),
+            energy-source: (get renewable-energy-source miner-data),
+            issued-date: stacks-block-height,
+            redeemed: false,
+            redeemed-by: none,
+            redemption-date: none,
+        })
+
+        (var-set next-credit-id (+ credit-id u1))
+
+        (print {
+            event: "credits-issued",
+            miner: miner,
+            amount: credit-amount,
+            credit-id: credit-id,
+            block-height: stacks-block-height,
+        })
+
+        (ok credit-id)
+    )
+)
+
+;; Credit Redemption Functions
+(define-public (redeem-credits
+        (credit-id uint)
+        (amount uint)
+    )
+    (let ((credit-data (unwrap! (map-get? mining-credits credit-id) ERR_CREDIT_NOT_FOUND)))
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (not (get redeemed credit-data)) ERR_ALREADY_REDEEMED)
+        (asserts! (>= (ft-get-balance green-hash-credits tx-sender) amount)
+            ERR_INSUFFICIENT_BALANCE
+        )
+
+        (try! (ft-burn? green-hash-credits amount tx-sender))
+        (var-set total-supply (- (var-get total-supply) amount))
+
+        (map-set mining-credits credit-id
+            (merge credit-data {
+                redeemed: true,
+                redeemed-by: (some tx-sender),
+                redemption-date: (some stacks-block-height),
+            })
+        )
+
+        (print {
+            event: "credits-redeemed",
+            redeemer: tx-sender,
+            amount: amount,
+            credit-id: credit-id,
+            original-miner: (get miner credit-data),
+            block-height: stacks-block-height,
+        })
+
+        (ok true)
+    )
+)
+
 ;; Read-only functions
 (define-read-only (is-verified-miner (miner principal))
     (default-to false (get verified (map-get? verified-miners miner)))
@@ -196,6 +294,21 @@
 
 (define-read-only (is-contract-paused)
     (var-get contract-paused)
+)
+
+(define-read-only (get-credit-info (credit-id uint))
+    (map-get? mining-credits credit-id)
+)
+
+(define-read-only (get-next-credit-id)
+    (var-get next-credit-id)
+)
+
+(define-read-only (calculate-mining-reward
+        (hash-power uint)
+        (duration uint)
+    )
+    (* hash-power duration)
 )
 
 ;; private functions
