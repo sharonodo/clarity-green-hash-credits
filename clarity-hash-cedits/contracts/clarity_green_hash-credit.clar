@@ -15,6 +15,9 @@
 (define-constant ERR_UNAUTHORIZED (err u100))
 (define-constant ERR_INSUFFICIENT_BALANCE (err u101))
 (define-constant ERR_INVALID_AMOUNT (err u102))
+(define-constant ERR_MINER_NOT_VERIFIED (err u103))
+(define-constant ERR_ALREADY_VERIFIED (err u104))
+(define-constant ERR_INVALID_HASH_POWER (err u105))
 (define-constant TOKEN_NAME "Green Hash Credits")
 (define-constant TOKEN_SYMBOL "GHC")
 (define-constant TOKEN_DECIMALS u6)
@@ -23,6 +26,22 @@
 ;; data vars
 (define-data-var total-supply uint u0)
 (define-data-var contract-paused bool false)
+
+;; data maps
+(define-map verified-miners
+    principal
+    {
+        hash-power: uint,
+        renewable-energy-source: (string-ascii 100),
+        verification-date: uint,
+        verified: bool,
+    }
+)
+
+(define-map verifiers
+    principal
+    bool
+)
 
 ;; SIP-010 Standard Functions
 (define-public (transfer
@@ -69,6 +88,23 @@
 )
 
 ;; Administrative Functions
+(define-public (add-verifier (verifier principal))
+    (begin
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (map-set verifiers verifier true)
+        (ok true)
+    )
+)
+
+(define-public (remove-verifier (verifier principal))
+    (begin
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+        (map-delete verifiers verifier)
+        (ok true)
+    )
+)
+
 (define-public (pause-contract)
     (begin
         (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
@@ -85,13 +121,97 @@
     )
 )
 
+;; Miner Verification Functions
+(define-public (verify-miner
+        (miner principal)
+        (hash-power uint)
+        (energy-source (string-ascii 100))
+    )
+    (begin
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (default-to false (map-get? verifiers tx-sender))
+            ERR_UNAUTHORIZED
+        )
+        (asserts! (> hash-power u0) ERR_INVALID_HASH_POWER)
+        (asserts! (is-none (map-get? verified-miners miner)) ERR_ALREADY_VERIFIED)
+        (asserts! (is-valid-energy-source energy-source) ERR_INVALID_AMOUNT)
+
+        (map-set verified-miners miner {
+            hash-power: hash-power,
+            renewable-energy-source: energy-source,
+            verification-date: stacks-block-height,
+            verified: true,
+        })
+
+        (print {
+            event: "miner-verified",
+            miner: miner,
+            hash-power: hash-power,
+            energy-source: energy-source,
+            block-height: stacks-block-height,
+        })
+
+        (ok true)
+    )
+)
+
+(define-public (update-miner-hash-power
+        (miner principal)
+        (new-hash-power uint)
+    )
+    (let ((miner-data (unwrap! (map-get? verified-miners miner) ERR_MINER_NOT_VERIFIED)))
+        (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+        (asserts! (default-to false (map-get? verifiers tx-sender))
+            ERR_UNAUTHORIZED
+        )
+        (asserts! (> new-hash-power u0) ERR_INVALID_HASH_POWER)
+
+        (map-set verified-miners miner
+            (merge miner-data { hash-power: new-hash-power })
+        )
+
+        (print {
+            event: "hash-power-updated",
+            miner: miner,
+            new-hash-power: new-hash-power,
+            block-height: stacks-block-height,
+        })
+
+        (ok true)
+    )
+)
+
 ;; Read-only functions
+(define-read-only (is-verified-miner (miner principal))
+    (default-to false (get verified (map-get? verified-miners miner)))
+)
+
+(define-read-only (get-miner-info (miner principal))
+    (map-get? verified-miners miner)
+)
+
+(define-read-only (is-verifier (account principal))
+    (default-to false (map-get? verifiers account))
+)
+
 (define-read-only (is-contract-paused)
     (var-get contract-paused)
 )
 
+;; private functions
+(define-private (is-valid-energy-source (source (string-ascii 100)))
+    (or
+        (is-eq source "solar")
+        (is-eq source "wind")
+        (is-eq source "hydro")
+        (is-eq source "geothermal")
+        (is-eq source "nuclear")
+    )
+)
+
 ;; Initialize contract
 (begin
+    (map-set verifiers CONTRACT_OWNER true)
     (print {
         event: "contract-deployed",
         owner: CONTRACT_OWNER,
